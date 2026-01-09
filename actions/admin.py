@@ -8,7 +8,7 @@ from actions.helpers import append_audit, next_prefixed_id
 from auth import permissions_for_role
 from models import AuditLog, JobTemplate, Permission, Role, Setting, User
 from utils import ApiError, AuthContext, iso_utc_now, normalize_role
-from pii import decrypt_pii, encrypt_pii, hash_email, hash_name, mask_email, mask_name
+from pii import decrypt_pii, encrypt_pii, hash_email
 
 
 def users_list(data, auth: AuthContext | None, db, cfg):
@@ -24,7 +24,6 @@ def users_list(data, auth: AuthContext | None, db, cfg):
     status_uc = str(status).upper().strip() if status else None
     q_str = str(q).strip() if q else ""
     q_lc = q_str.lower() if q_str else None
-    q_email_hash = hash_email(q_str, cfg.PEPPER) if q_str and "@" in q_str else ""
 
     can_pii = bool(getattr(cfg, "PII_ENC_KEY", "").strip()) and bool(auth and auth.valid) and str(getattr(auth, "role", "") or "").upper() in set(
         getattr(cfg, "PII_VIEW_ROLES", []) or []
@@ -41,8 +40,8 @@ def users_list(data, auth: AuthContext | None, db, cfg):
 
         item = {
             "userId": u.userId or "",
-            "email": email_full or (u.userId or ""),
-            "fullName": name_full or (u.userId or ""),
+            "email": email_full or (u.email or "") or (u.userId or ""),
+            "fullName": name_full or (u.fullName or "") or (u.userId or ""),
             "role": u.role or "",
             "status": u.status or "",
             "lastLoginAt": u.lastLoginAt or "",
@@ -54,14 +53,9 @@ def users_list(data, auth: AuthContext | None, db, cfg):
         if status_uc and str(item["status"]).upper() != status_uc:
             continue
         if q_lc:
-            if q_email_hash:
-                stored_h = str(getattr(u, "email_hash", "") or getattr(u, "email", "") or "").strip().lower()
-                if stored_h != q_email_hash:
-                    continue
-            else:
-                hay = f"{item['userId']} {item['email']} {item['fullName']} {item['role']}".lower()
-                if q_lc not in hay:
-                    continue
+            hay = f"{item['userId']} {item['email']} {item['fullName']} {item['role']}".lower()
+            if q_lc not in hay:
+                continue
         items.append(item)
 
     items.sort(key=lambda x: (str(x.get("role", "")), str(x.get("email", ""))))
@@ -102,15 +96,14 @@ def users_upsert(data, auth: AuthContext | None, db, cfg):
     now = iso_utc_now()
     updated_by = str(auth.userId or "") if auth else ""
 
-    email_h = hash_email(email, cfg.PEPPER)
-    email_m = mask_email(email_raw)
-    name_h = hash_name(full_name, cfg.PEPPER)
-    name_m = mask_name(full_name)
+    # Prefer plaintext email match
+    existing = db.execute(select(User).where(func.lower(User.email) == email)).scalar_one_or_none()
 
-    existing = db.execute(select(User).where(User.email_hash == email_h)).scalar_one_or_none()
-    if not existing:
-        # Backward compatibility: legacy rows may still store plaintext emails.
-        existing = db.execute(select(User).where(func.lower(User.email) == email)).scalar_one_or_none()
+    # Backward compatibility: older DBs stored deterministic email hashes in `users.email`.
+    if not existing and str(getattr(cfg, "PEPPER", "") or "").strip():
+        legacy_h = hash_email(email, cfg.PEPPER)
+        if legacy_h:
+            existing = db.execute(select(User).where(User.email == legacy_h)).scalar_one_or_none()
     if not existing:
         existing_ids = [x for x in db.execute(select(User.userId)).scalars().all()]
         user_id = next_prefixed_id(
@@ -130,12 +123,8 @@ def users_upsert(data, auth: AuthContext | None, db, cfg):
         db.add(
             User(
                 userId=user_id,
-                email=email_h,
-                fullName=name_m,
-                email_hash=email_h,
-                name_hash=name_h,
-                email_masked=email_m,
-                name_masked=name_m,
+                email=email,
+                fullName=full_name,
                 email_enc=email_enc,
                 name_enc=name_enc,
                 role=role,
@@ -155,17 +144,13 @@ def users_upsert(data, auth: AuthContext | None, db, cfg):
             action="USERS_UPSERT",
             stageTag="ADMIN_USERS_UPSERT",
             actor=auth,
-            meta={"mode": "create", "email_hash": email_h, "role": role, "status": final_status},
+            meta={"mode": "create", "email": email, "role": role, "status": final_status},
             at=now,
         )
         return {"userId": user_id, "mode": "create"}
 
-    existing.email = email_h
-    existing.email_hash = email_h
-    existing.email_masked = email_m
-    existing.fullName = name_m
-    existing.name_hash = name_h
-    existing.name_masked = name_m
+    existing.email = email
+    existing.fullName = full_name
     if str(getattr(cfg, "PII_ENC_KEY", "") or "").strip():
         email_enc = encrypt_pii(email, key=cfg.PII_ENC_KEY, aad=f"user:{existing.userId}:email")
         name_enc = encrypt_pii(full_name, key=cfg.PII_ENC_KEY, aad=f"user:{existing.userId}:name")
@@ -185,7 +170,7 @@ def users_upsert(data, auth: AuthContext | None, db, cfg):
         action="USERS_UPSERT",
         stageTag="ADMIN_USERS_UPSERT",
         actor=auth,
-        meta={"mode": "update", "email_hash": email_h, "role": role, "status": final_status},
+        meta={"mode": "update", "email": email, "role": role, "status": final_status},
         at=now,
     )
     return {"userId": existing.userId, "mode": "update"}

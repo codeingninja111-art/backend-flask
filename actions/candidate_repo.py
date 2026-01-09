@@ -21,17 +21,17 @@ def normalize_candidate_name(name: Any) -> str:
     return normalize_name(str(name or ""))
 
 
-def has_duplicate_candidate_in_requirement(db, *, requirement_id: str, name_hash: str, mobile_hash: str) -> bool:
-    nh = str(name_hash or "").strip().lower()
-    mh = str(mobile_hash or "").strip().lower()
+def has_duplicate_candidate_in_requirement(db, *, requirement_id: str, name_norm: str, mobile_norm: str) -> bool:
+    nh = normalize_name(str(name_norm or ""))
+    mh = normalize_phone(str(mobile_norm or ""))
     if not requirement_id or not nh or not mh:
         return False
     row = (
         db.execute(
             select(Candidate.candidateId)
             .where(Candidate.requirementId == requirement_id)
-            .where(Candidate.name_hash == nh)
-            .where(Candidate.mobile_hash == mh)
+            .where(Candidate.candidateNameNorm == nh)
+            .where(Candidate.mobileNorm == mh)
         )
         .scalars()
         .first()

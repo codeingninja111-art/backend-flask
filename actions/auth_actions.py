@@ -14,19 +14,21 @@ def _find_user_by_email(db, cfg, email_or_hash: str):
     if not s:
         return None
 
-    email_h = s.lower() if looks_like_sha256_hex(s) else hash_email(s, cfg.PEPPER)
-    if email_h:
-        found = db.execute(select(User).where(User.email_hash == email_h)).scalars().first()
-        if found:
-            return found
-        found = db.execute(select(User).where(User.email == email_h)).scalars().first()
+    # Preferred: plaintext email lookup (case-insensitive).
+    email_lc = str(s).lower().strip()
+    if email_lc and "@" in email_lc:
+        found = db.execute(select(User).where(func.lower(User.email) == email_lc)).scalars().first()
         if found:
             return found
 
-    # Backward compatibility: pre-migration rows may still store plaintext emails.
-    email_lc = str(s).lower().strip()
-    if email_lc and "@" in email_lc:
-        return db.execute(select(User).where(func.lower(User.email) == email_lc)).scalars().first()
+    # Backward compatibility: older DBs stored deterministic email hashes in `users.email`.
+    # If PEPPER is available we can still find those users.
+    if str(getattr(cfg, "PEPPER", "") or "").strip() and (looks_like_sha256_hex(s) or ("@" in s)):
+        email_h = s.lower() if looks_like_sha256_hex(s) else hash_email(s, cfg.PEPPER)
+        if email_h:
+            found = db.execute(select(User).where(User.email == email_h)).scalars().first()
+            if found:
+                return found
     return None
 
 
@@ -74,11 +76,11 @@ def login_exchange(data, auth: AuthContext | None, db, cfg):
             if enc:
                 user.name_enc = enc
 
-    _update_user_last_login(db, cfg, user.email_hash or user.email)
+    _update_user_last_login(db, cfg, user.email)
     ses = issue_session_token(
         db,
         user_id=user.userId,
-        email=(user.email_hash or user.email),
+        email=user.email,
         role=user.role,
         session_ttl_minutes=cfg.SESSION_TTL_MINUTES,
     )
@@ -91,7 +93,7 @@ def login_exchange(data, auth: AuthContext | None, db, cfg):
         stageTag="AUTH_LOGIN",
         remark="",
         actor=AuthContext(valid=True, userId=user.userId, email=user.email, role=normalize_role(user.role) or "", expiresAt=ses["expiresAt"]),
-        meta={"email_hash": user.email_hash or user.email},
+        meta={"email": user.email},
     )
 
     return {

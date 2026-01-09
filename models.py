@@ -18,13 +18,8 @@ class User(Base):
     userId = Column(String, primary_key=True)
     email = Column(String, nullable=False, unique=True, index=True)
     fullName = Column(Text, nullable=False, default="")
-    # Deterministic pseudonymization (HMAC-SHA256 with PEPPER).
-    email_hash = Column(String, nullable=False, default="", index=True)
-    name_hash = Column(String, nullable=False, default="", index=True)
-    # Display-safe masked values (never full PII).
-    email_masked = Column(Text, nullable=False, default="")
-    name_masked = Column(Text, nullable=False, default="")
-    # Encrypted-at-rest full values (AES-256-GCM; optional).
+    # Optional encrypted-at-rest full values (AES-256-GCM).
+    # When present, these can be used for recovery/migration.
     email_enc = Column(Text, nullable=False, default="")
     name_enc = Column(Text, nullable=False, default="")
     role = Column(String, nullable=False, index=True)
@@ -154,13 +149,10 @@ class Candidate(Base):
     candidateName = Column(Text, nullable=False, default="")
     jobRole = Column(Text, nullable=False, default="")
     mobile = Column(String, nullable=False, default="")
-    # Deterministic pseudonymization (HMAC-SHA256 with PEPPER).
-    name_hash = Column(String, nullable=False, default="", index=True)
-    mobile_hash = Column(String, nullable=False, default="", index=True)
-    # Display-safe masked values (never full PII).
-    name_masked = Column(Text, nullable=False, default="")
-    mobile_masked = Column(Text, nullable=False, default="")
-    # Encrypted-at-rest full values (AES-256-GCM; optional).
+    # Non-hash normalized fields used for dedupe/lookups.
+    candidateNameNorm = Column(Text, nullable=False, default="", index=True)
+    mobileNorm = Column(String, nullable=False, default="", index=True)
+    # Optional encrypted-at-rest full values (AES-256-GCM).
     name_enc = Column(Text, nullable=False, default="")
     mobile_enc = Column(Text, nullable=False, default="")
     source = Column(Text, nullable=False, default="")

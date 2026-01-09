@@ -18,7 +18,7 @@ from actions.jobposting import assert_job_posting_complete
 from models import Candidate, RejectionLog, Requirement
 from utils import ApiError, AuthContext, decode_base64_to_bytes, iso_utc_now, parse_datetime_maybe, sanitize_filename, to_iso_utc
 from services.gas_uploader import gas_upload_file
-from pii import decrypt_pii, encrypt_pii, hash_name, hash_phone, mask_name, mask_phone
+from pii import decrypt_pii, encrypt_pii, normalize_name, normalize_phone
 
 
 def _get_requirement_job_role(db, requirement_id: str) -> str:
@@ -115,17 +115,15 @@ def candidate_add(data, auth: AuthContext | None, db, cfg):
     if not norm_mobile:
         raise ApiError("BAD_REQUEST", "Invalid mobile")
 
-    name_hash = hash_name(candidate_name, cfg.PEPPER)
-    mobile_hash = hash_phone(norm_mobile, cfg.PEPPER)
-    if has_duplicate_candidate_in_requirement(db, requirement_id=requirement_id, name_hash=name_hash, mobile_hash=mobile_hash):
+    name_norm = normalize_name(candidate_name)
+    mobile_norm = normalize_phone(norm_mobile)
+    if has_duplicate_candidate_in_requirement(db, requirement_id=requirement_id, name_norm=name_norm, mobile_norm=mobile_norm):
         raise ApiError("CONFLICT", "Candidate already exists (same name and mobile) in this requirement")
 
     existing_ids = [x for x in db.execute(select(Candidate.candidateId)).scalars().all()]
     candidate_id = next_prefixed_id(db, counter_key="CND", prefix="CND-", pad=5, existing_ids=existing_ids)
 
     now = iso_utc_now()
-    name_masked = mask_name(candidate_name)
-    mobile_masked = mask_phone(norm_mobile)
     name_enc = ""
     mobile_enc = ""
     if str(getattr(cfg, "PII_ENC_KEY", "") or "").strip():
@@ -135,13 +133,11 @@ def candidate_add(data, auth: AuthContext | None, db, cfg):
         Candidate(
             candidateId=candidate_id,
             requirementId=requirement_id,
-            candidateName=name_masked,
+            candidateName=candidate_name,
             jobRole=job_role,
-            mobile=mobile_masked,
-            name_hash=name_hash,
-            mobile_hash=mobile_hash,
-            name_masked=name_masked,
-            mobile_masked=mobile_masked,
+            mobile=norm_mobile,
+            candidateNameNorm=name_norm,
+            mobileNorm=mobile_norm,
             name_enc=name_enc,
             mobile_enc=mobile_enc,
             source=source,
@@ -196,15 +192,15 @@ def candidate_pii_set(data, auth: AuthContext | None, db, cfg):
     if not norm_mobile:
         raise ApiError("BAD_REQUEST", "Invalid mobile")
 
-    name_hash = hash_name(candidate_name, cfg.PEPPER)
-    mobile_hash = hash_phone(norm_mobile, cfg.PEPPER)
+    name_norm = normalize_name(candidate_name)
+    mobile_norm = normalize_phone(norm_mobile)
 
     dup = (
         db.execute(
             select(Candidate.candidateId)
             .where(Candidate.requirementId == requirement_id)
-            .where(Candidate.name_hash == name_hash)
-            .where(Candidate.mobile_hash == mobile_hash)
+            .where(Candidate.candidateNameNorm == name_norm)
+            .where(Candidate.mobileNorm == mobile_norm)
             .where(Candidate.candidateId != candidate_id)
         )
         .scalars()
@@ -213,21 +209,16 @@ def candidate_pii_set(data, auth: AuthContext | None, db, cfg):
     if dup:
         raise ApiError("CONFLICT", "Candidate already exists (same name and mobile) in this requirement")
 
-    name_masked = mask_name(candidate_name)
-    mobile_masked = mask_phone(norm_mobile)
-
     name_enc = ""
     mobile_enc = ""
     if str(getattr(cfg, "PII_ENC_KEY", "") or "").strip():
         name_enc = encrypt_pii(candidate_name, key=cfg.PII_ENC_KEY, aad=f"candidate:{candidate_id}:name")
         mobile_enc = encrypt_pii(norm_mobile, key=cfg.PII_ENC_KEY, aad=f"candidate:{candidate_id}:mobile")
 
-    cand.name_hash = name_hash
-    cand.mobile_hash = mobile_hash
-    cand.name_masked = name_masked
-    cand.mobile_masked = mobile_masked
-    cand.candidateName = name_masked
-    cand.mobile = mobile_masked
+    cand.candidateName = candidate_name
+    cand.mobile = norm_mobile
+    cand.candidateNameNorm = name_norm
+    cand.mobileNorm = mobile_norm
     if name_enc:
         cand.name_enc = name_enc
     if mobile_enc:
@@ -272,8 +263,8 @@ def candidate_bulk_add(data, auth: AuthContext | None, db, cfg):
     existing = db.execute(select(Candidate).where(Candidate.requirementId == requirement_id)).scalars().all()
     existing_keys = set()
     for c in existing:
-        nh = str(getattr(c, "name_hash", "") or "").strip().lower()
-        mh = str(getattr(c, "mobile_hash", "") or "").strip().lower()
+        nh = normalize_name(str(getattr(c, "candidateNameNorm", "") or getattr(c, "candidateName", "") or ""))
+        mh = normalize_phone(str(getattr(c, "mobileNorm", "") or getattr(c, "mobile", "") or ""))
         if nh and mh:
             existing_keys.add(f"{nh}|{mh}")
 
@@ -301,9 +292,9 @@ def candidate_bulk_add(data, auth: AuthContext | None, db, cfg):
             errors.append({"index": i, "message": "Invalid mobile"})
             continue
 
-        name_hash = hash_name(candidate_name, cfg.PEPPER)
-        mobile_hash = hash_phone(norm_mobile, cfg.PEPPER)
-        cand_key = f"{name_hash}|{mobile_hash}"
+        name_norm = normalize_name(candidate_name)
+        mobile_norm = normalize_phone(norm_mobile)
+        cand_key = f"{name_norm}|{mobile_norm}"
         if cand_key in existing_keys:
             errors.append({"index": i, "message": "Duplicate candidate (same name and mobile) in requirement"})
             continue
@@ -312,8 +303,6 @@ def candidate_bulk_add(data, auth: AuthContext | None, db, cfg):
         candidate_id = next_prefixed_id(db, counter_key="CND", prefix="CND-", pad=5, existing_ids=ids_pool)
         ids_pool.append(candidate_id)
 
-        name_masked = mask_name(candidate_name)
-        mobile_masked = mask_phone(norm_mobile)
         name_enc = ""
         mobile_enc = ""
         if str(getattr(cfg, "PII_ENC_KEY", "") or "").strip():
@@ -323,13 +312,11 @@ def candidate_bulk_add(data, auth: AuthContext | None, db, cfg):
             Candidate(
                 candidateId=candidate_id,
                 requirementId=requirement_id,
-                candidateName=name_masked,
+                candidateName=candidate_name,
                 jobRole=job_role,
-                mobile=mobile_masked,
-                name_hash=name_hash,
-                mobile_hash=mobile_hash,
-                name_masked=name_masked,
-                mobile_masked=mobile_masked,
+                mobile=norm_mobile,
+                candidateNameNorm=name_norm,
+                mobileNorm=mobile_norm,
                 name_enc=name_enc,
                 mobile_enc=mobile_enc,
                 source=source,
